@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  bluelock:
+    build: .
+    image: bluelock-portal:latest
+    ports:
+      - '3000:3000'
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - REPORT_DIR=reports/BlueLock_Exam_Reports
+    volumes:
+      - ./database:/app/database
+      - ./reports:/app/reports
+    restart: unless-stopped

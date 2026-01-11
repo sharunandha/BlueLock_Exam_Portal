@@ -13,7 +13,11 @@
     "test:watch": "vitest",
     "lint": "eslint . --ext .ts,.tsx,.js --max-warnings=0",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "prepare": "husky install"
+    "prepare": "husky install",
+    "docker:build": "docker build -t bluelock-portal:local .",
+    "docker:run": "docker run --rm -p 3000:3000 -e PORT=3000 -v ./database:/app/database -v ./reports:/app/reports bluelock-portal:local",
+    "compose:up": "docker-compose up -d --build",
+    "compose:down": "docker-compose down"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx}": [

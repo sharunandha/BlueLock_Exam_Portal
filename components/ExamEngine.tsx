@@ -11,7 +11,7 @@ const VIOLATION_LIMIT = 3;
 
 const ExamEngine: React.FC<Props> = ({ exam, user, onFinish }) => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, number>>({});
+  const [answers, setAnswers] = useState<Record<string, any>>({});
   const [violations, setViolations] = useState<Violation[]>([]);
   const [timeLeft, setTimeLeft] = useState(exam.durationMinutes * 60);
   const [isFullScreen, setIsFullScreen] = useState(false);
@@ -19,6 +19,7 @@ const ExamEngine: React.FC<Props> = ({ exam, user, onFinish }) => {
   const [showViolationLog, setShowViolationLog] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const startTimeRef = useRef<number>(Date.now());
 
   const enterFullScreen = async () => {
     try {
@@ -133,8 +134,23 @@ const ExamEngine: React.FC<Props> = ({ exam, user, onFinish }) => {
     setIsSubmitting(true);
 
     let score = 0;
+    const arraysEqual = (a: any[], b: any[]) => {
+      if (!Array.isArray(a) || !Array.isArray(b)) return false;
+      if (a.length !== b.length) return false;
+      const sa = [...a].sort();
+      const sb = [...b].sort();
+      return sa.every((v, i) => v === sb[i]);
+    };
+
     exam.questions.forEach((q) => {
-      if (answers[q.id] === q.correctAnswer) score++;
+      const ans = answers[q.id];
+      if (q.type === 'MCQ') {
+        if (ans === q.correctAnswer) score++;
+      } else if (q.type === 'MSQ') {
+        if (Array.isArray(q.correctAnswer) && arraysEqual(ans || [], q.correctAnswer)) score++;
+      } else if (q.type === 'FIB') {
+        if (typeof q.correctAnswer === 'string' && typeof ans === 'string' && ans.trim().toLowerCase() === q.correctAnswer.trim().toLowerCase()) score++;
+      }
     });
 
     // Simulated API Call
@@ -144,11 +160,39 @@ const ExamEngine: React.FC<Props> = ({ exam, user, onFinish }) => {
       violations: finalViolations,
     });
 
-    alert(
-      `EVALUATION COMPLETE\nFinal Score: ${score}/${exam.questions.length}\nStatus: ${
-        score / exam.questions.length >= 0.5 ? 'PASSED' : 'FAILED'
-      }`
-    );
+    // Send submission to backend
+    try {
+      const payload = {
+        userId: user.id,
+        userName: user.name,
+        examId: exam.id,
+        score,
+        totalQuestions: exam.questions.length,
+        violations: finalViolations || [],
+        startTime: startTimeRef.current,
+        endTime: Date.now(),
+        browser: navigator.userAgent,
+        examName: exam.title,
+      } as any;
+
+      const r = await fetch('/api/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+
+      alert(
+        `EVALUATION COMPLETE\nFinal Score: ${score}/${exam.questions.length}\nStatus: ${
+          score / exam.questions.length >= 0.5 ? 'PASSED' : 'FAILED'
+        }\nReport: ${j?.reportPath || 'N/A'}`
+      );
+    } catch (e) {
+      console.error('Submission failed', e);
+      alert('Submission failed: ' + String(e));
+    }
 
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     onFinish();
@@ -273,38 +317,63 @@ const ExamEngine: React.FC<Props> = ({ exam, user, onFinish }) => {
             </h3>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {currentQuestion.options.map((opt, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => setAnswers({ ...answers, [currentQuestion.id]: idx })}
-                  className={`flex items-center text-left p-6 rounded-2xl border-2 transition-all duration-200 group/opt ${
-                    answers[currentQuestion.id] === idx
-                      ? 'border-sky-500 bg-sky-500/10 shadow-[0_0_20px_rgba(14,165,233,0.1)]'
-                      : 'border-slate-700 hover:border-slate-500 bg-slate-900/40'
-                  }`}
-                >
-                  <div
-                    className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center mr-4 transition-all ${
-                      answers[currentQuestion.id] === idx
-                        ? 'bg-sky-500 border-sky-400 scale-110'
-                        : 'bg-slate-800 border-slate-600'
+              {currentQuestion.type === 'FIB' ? (
+              <div>
+                <input
+                  type="text"
+                  value={answers[currentQuestion.id] || ''}
+                  onChange={(e) => setAnswers({ ...answers, [currentQuestion.id]: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-sky-500 transition-all"
+                  placeholder="Type your answer here"
+                />
+              </div>
+            ) : (
+              currentQuestion.options.map((opt, idx) => {
+                const isSelected = Array.isArray(answers[currentQuestion.id])
+                  ? answers[currentQuestion.id].includes(idx)
+                  : answers[currentQuestion.id] === idx;
+
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => {
+                      if (currentQuestion.type === 'MSQ') {
+                        const prev = Array.isArray(answers[currentQuestion.id]) ? answers[currentQuestion.id] : [];
+                        const exists = prev.includes(idx);
+                        const next = exists ? prev.filter((n: number) => n !== idx) : [...prev, idx];
+                        setAnswers({ ...answers, [currentQuestion.id]: next });
+                      } else {
+                        setAnswers({ ...answers, [currentQuestion.id]: idx });
+                      }
+                    }}
+                    className={`flex items-center text-left p-6 rounded-2xl border-2 transition-all duration-200 group/opt ${
+                      isSelected
+                        ? 'border-sky-500 bg-sky-500/10 shadow-[0_0_20px_rgba(14,165,233,0.1)]'
+                        : 'border-slate-700 hover:border-slate-500 bg-slate-900/40'
                     }`}
                   >
-                    <span className="text-xs font-bold text-white">
-                      {String.fromCharCode(65 + idx)}
+                    <div
+                      className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center mr-4 transition-all ${
+                        isSelected
+                          ? 'bg-sky-500 border-sky-400 scale-110'
+                          : 'bg-slate-800 border-slate-600'
+                      }`}
+                    >
+                      <span className="text-xs font-bold text-white">
+                        {String.fromCharCode(65 + idx)}
+                      </span>
+                    </div>
+                    <span
+                      className={`text-lg font-medium ${
+                        isSelected ? 'text-white' : 'text-slate-400 group-hover/opt:text-slate-200'
+                      }`}
+                    >
+                      {opt}
                     </span>
-                  </div>
-                  <span
-                    className={`text-lg font-medium ${
-                      answers[currentQuestion.id] === idx
-                        ? 'text-white'
-                        : 'text-slate-400 group-hover/opt:text-slate-200'
-                    }`}
-                  >
-                    {opt}
-                  </span>
-                </button>
-              ))}
+                  </button>
+                );
+              })
+            )}
             </div>
           </div>
 

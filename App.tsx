@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { User, Exam } from './types';
 import Login from './components/Login';
 import AdminDashboard from './components/AdminDashboard';
+import ErrorBoundary from './components/ErrorBoundary';
 import ExamEngine from './components/ExamEngine';
 import StudentHome from './components/StudentHome';
 
@@ -28,7 +29,29 @@ const App: React.FC = () => {
     setView(u.role === 'admin' ? 'ADMIN' : 'STUDENT_HOME');
   };
 
-  const startExam = (exam: Exam) => {
+  const startExam = async (exam: Exam) => {
+    // Scheduling checks
+    const now = Date.now();
+    if (exam.startTime && now < exam.startTime) {
+      alert('Exam not yet open. Starts at: ' + new Date(exam.startTime).toLocaleString());
+      return;
+    }
+    if (exam.endTime && now > exam.endTime) {
+      alert('Exam has already closed.');
+      return;
+    }
+
+    // Check if user already submitted
+    try {
+      const resp = await fetch(`/api/submissions/check?examId=${exam.id}&userId=${user?.id}`);
+      if (resp.ok) {
+        const js = await resp.json();
+        if (js.submitted) return alert('You have already attempted this exam.');
+      }
+    } catch (e) {
+      console.error('Submission check failed', e);
+    }
+
     // Browser/Device Check
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
     const isChromeOrEdge = /Chrome|Edg/.test(navigator.userAgent);
@@ -84,7 +107,11 @@ const App: React.FC = () => {
       {/* Main Content */}
       <main className="flex-1 container mx-auto p-4 md:p-8">
         {view === 'LOGIN' && <Login onLogin={handleLogin} />}
-        {view === 'ADMIN' && <AdminDashboard exams={exams} setExams={setExams} />}
+        {view === 'ADMIN' && (
+          <ErrorBoundary>
+            <AdminDashboard exams={exams} setExams={setExams} />
+          </ErrorBoundary>
+        )}
         {view === 'STUDENT_HOME' && <StudentHome exams={exams} onStartExam={startExam} />}
         {view === 'EXAM' && activeExam && user && (
           <ExamEngine exam={activeExam} user={user} onFinish={finishExam} />

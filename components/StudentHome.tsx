@@ -41,10 +41,15 @@ const StudentHome: React.FC<Props> = ({ exams, onStartExam }) => {
                 <i className="fa-solid fa-list-check"></i> {exam.questions.length} Questions
               </span>
             </div>
+            <div className="text-xs text-slate-400 mb-3">
+              {exam.startTime && <div>Opens: {new Date(exam.startTime).toLocaleString()}</div>}
+              {exam.endTime && <div>Closes: {new Date(exam.endTime).toLocaleString()}</div>}
+            </div>
             <div className="mt-auto">
               <button
                 onClick={() => onStartExam(exam)}
-                className="w-full py-3 bg-slate-700 hover:bg-sky-600 rounded-xl font-bold transition-all transform active:scale-95 flex items-center justify-center gap-2"
+                disabled={!exam.active || (exam.startTime && Date.now() < exam.startTime) || (exam.endTime && Date.now() > exam.endTime)}
+                className="w-full py-3 bg-slate-700 hover:bg-sky-600 rounded-xl font-bold transition-all transform active:scale-95 flex items-center justify-center gap-2 disabled:opacity-40"
               >
                 Start Selection <i className="fa-solid fa-arrow-right"></i>
               </button>

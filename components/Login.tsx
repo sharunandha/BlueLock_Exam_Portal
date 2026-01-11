@@ -12,6 +12,26 @@ const Login: React.FC<Props> = ({ onLogin }) => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
+
+    // Restrict Admin credentials
+    const isAdminCred = email === '95088' || email.toLowerCase() === 'sharuadmin@gmail.com';
+    if (role === 'admin' && !isAdminCred) {
+      alert('Admin login is restricted. Use the designated admin registration or email.');
+      return;
+    }
+
+    // For admin, ensure consistent id/email
+    if (role === 'admin' && isAdminCred) {
+      onLogin({
+        id: '95088',
+        name: 'Admin',
+        email: 'sharuadmin@gmail.com',
+        role: 'admin',
+      });
+      return;
+    }
+
+    // Student login
     onLogin({
       id: Math.random().toString(36).substr(2, 9),
       name: email.split('@')[0],

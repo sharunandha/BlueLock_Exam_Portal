@@ -20,6 +20,11 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
     totalViolations: 12,
   });
 
+  // Local helpers to update UI state proactively (won't duplicate socket-updates)
+  const replaceExamLocal = (exam: Exam) => setExams((prev) => prev.map((e) => (e.id === exam.id ? { ...e, ...exam } : e)));
+  const removeExamLocal = (id: string) => setExams((prev) => prev.filter((e) => e.id !== id));
+
+
   useEffect(() => {
     // Fetch real exams from server
     (async () => {
@@ -43,24 +48,41 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
       }
     })();
 
+
+
     // Connect socket explicitly to current origin so Vite proxy can forward /socket.io in dev
-    const socket = io(window.location.origin);
+    let socket;
+    try {
+      socket = io(window.location.origin);
+    } catch (err) {
+      console.error('Socket.IO init error:', err);
+      // provide a no-op socket so the component doesn't crash in environments without window/socket
+      socket = {
+        on: () => {},
+        disconnect: () => {},
+      } as any;
+    }
 
     socket.on('submission', (s: any) => {
-      setLiveSubmissions((prev) => [s, ...prev].slice(0, 20));
-      // refresh stats from server for accuracy
-      fetch('/api/stats')
-        .then((r) => r.json())
-        .then((ns) => setStats(ns))
-        .catch(() => {});
+      try {
+        setLiveSubmissions((prev) => [s, ...prev].slice(0, 20));
+        // refresh stats from server for accuracy
+        fetch('/api/stats')
+          .then((r) => r.json())
+          .then((ns) => setStats(ns))
+          .catch(() => {});
+      } catch (e) {
+        console.error('Error processing submission event', e);
+      }
     });
 
     socket.on('examCreated', (exam: Exam) => {
-      setExams((prev) => [exam, ...prev]);
+      // only add if not present (avoid duplicate when client also adds on response)
+      setExams((prev) => (prev.some((e) => e.id === exam.id) ? prev : [exam, ...prev]));
     });
 
     socket.on('examUpdated', (exam: Exam) => {
-      setExams((prev) => prev.map((e) => (e.id === exam.id ? { ...e, ...exam } : e)));
+      setExams((prev) => (prev.some((e) => e.id === exam.id) ? prev.map((e) => (e.id === exam.id ? { ...e, ...exam } : e)) : [exam, ...prev]));
     });
 
     socket.on('examDeleted', ({ id }: any) => {
@@ -87,15 +109,50 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                 if (!title) return;
                 const duration = parseInt(prompt('Duration minutes', '30') || '30', 10);
                 const active = confirm('Set exam active? OK = active');
-                const newExam = { title, durationMinutes: duration, questions: [], active };
+
+                // Ask for schedule in 12-hour format. Support full date/time or just time (today)
+                const parse12 = (input: string | null) => {
+                  if (!input) return null;
+                  // If user enters full date e.g., 2026-01-11 08:00 AM or 2026-01-11 8:00 PM
+                  let s = input.trim();
+                  // replace multiple spaces
+                  s = s.replace(/\s+/g, ' ');
+                  // Accept either 'hh:mm AM' or 'YYYY-MM-DD hh:mm AM'
+                  if (!/\d{4}-\d{2}-\d{2}/.test(s)) {
+                    // assume today
+                    const today = new Date();
+                    const datePart = today.toISOString().slice(0, 10);
+                    s = `${datePart} ${s}`;
+                  }
+                  const t = new Date(s);
+                  if (isNaN(t.getTime())) return null;
+                  return t.getTime();
+                };
+
+                const startInput = prompt('Start time (e.g. "08:00 AM" or "2026-01-11 08:00 AM")');
+                const endInput = prompt('End time (e.g. "08:00 PM" or "2026-01-11 08:00 PM")');
+                const startTime = parse12(startInput);
+                const endTime = parse12(endInput);
+
+                const newExam: any = { title, durationMinutes: duration, questions: [], active };
+                if (startTime) newExam.startTime = startTime;
+                if (endTime) newExam.endTime = endTime;
+
                 const r = await fetch('/api/exams', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(newExam),
                 });
-                if (!r.ok) throw new Error('Create failed');
+                if (!r.ok) {
+                  const errText = await r.text();
+                  throw new Error('Create failed: ' + errText);
+                }
                 const j = await r.json();
-                if (j?.exam) alert('Created exam: ' + j.exam.title);
+                if (j?.exam) {
+                  // avoid duplication if already exists
+                  setExams((prev) => (prev.some((e) => e.id === j.exam.id) ? prev : [j.exam, ...prev]));
+                  alert('Created exam: ' + j.exam.title);
+                }
               } catch (e) {
                 console.error('Create exam error', e);
                 alert('Could not create exam — check server logs or network.');
@@ -107,10 +164,16 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
           </button>
           <button
             onClick={async () => {
-              const res = await fetch('/api/export/all');
-              const j = await res.json();
-              if (j?.file) {
-                window.open(j.file, '_blank');
+              try {
+                const res = await fetch('/api/export/all');
+                if (!res.ok) throw new Error(await res.text());
+                const j = await res.json();
+                if (j?.file) {
+                  window.open(j.file, '_blank');
+                }
+              } catch (e) {
+                console.error('Export failed', e);
+                alert('Export failed: ' + String(e));
               }
             }}
             className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
@@ -175,7 +238,7 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                   </div>
                 </div>
                 <div className="text-xs text-slate-400">
-                  {new Date(s.endTime).toLocaleTimeString()}
+                  {s?.endTime ? new Date(s.endTime).toLocaleTimeString() : ''}
                 </div>
               </li>
             ))}
@@ -191,20 +254,29 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
             <button
               onClick={async () => {
                 try {
+                  const duration = 20;
+                  const now = Date.now();
                   const newExam = {
                     title: 'Live Generated Test',
-                    durationMinutes: 20,
+                    durationMinutes: duration,
                     questions: [],
                     active: true,
+                    startTime: now,
+                    endTime: now + duration * 60 * 1000,
                   };
                   const r = await fetch('/api/exams', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(newExam),
                   });
-                  if (!r.ok) throw new Error('Create failed');
+                  if (!r.ok) {
+                    throw new Error('Create failed');
+                  }
                   const j = await r.json();
-                  if (j?.exam) alert('Created exam: ' + j.exam.title);
+                  if (j?.exam) {
+                    setExams((prev) => (prev.some((e) => e.id === j.exam.id) ? prev : [j.exam, ...prev]));
+                    alert('Created exam: ' + j.exam.title);
+                  }
                 } catch (e) {
                   console.error('Create live exam error', e);
                   alert('Could not create live exam — check server or network');
@@ -220,12 +292,21 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                 if (!exams[0]) return alert('No exams to toggle');
                 const first = exams[0];
                 const u = { ...first, active: !first.active };
-                await fetch('/api/exams/' + first.id, {
-                  method: 'PUT',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(u),
-                });
-                alert('Toggled first exam active state');
+                try {
+                  const r = await fetch('/api/exams/' + first.id, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(u),
+                  });
+                  if (!r.ok) throw new Error(await r.text());
+                  const j = await r.json();
+                  if (j?.exam) replaceExamLocal(j.exam);
+                  else replaceExamLocal(u);
+                  alert('Toggled first exam active state');
+                } catch (e) {
+                  console.error('Toggle failed', e);
+                  alert('Toggle failed: ' + String(e));
+                }
               }}
               className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg font-bold transition-all"
             >
@@ -296,19 +377,44 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                               10
                             );
                             const active = confirm('Set active? OK = active');
-                            const payload = {
+                            const parse12 = (input: string | null) => {
+                              if (!input) return null;
+                              let s = input.trim();
+                              s = s.replace(/\s+/g, ' ');
+                              if (!/\d{4}-\d{2}-\d{2}/.test(s)) {
+                                const today = new Date();
+                                const datePart = today.toISOString().slice(0, 10);
+                                s = `${datePart} ${s}`;
+                              }
+                              const t = new Date(s);
+                              if (isNaN(t.getTime())) return null;
+                              return t.getTime();
+                            };
+
+                            const startInput = prompt('Start time (e.g. "08:00 AM" or "2026-01-11 08:00 AM")', exam.startTime ? new Date(exam.startTime).toLocaleString() : '');
+                            const endInput = prompt('End time (e.g. "08:00 PM" or "2026-01-11 08:00 PM")', exam.endTime ? new Date(exam.endTime).toLocaleString() : '');
+                            const startTime = parse12(startInput);
+                            const endTime = parse12(endInput);
+
+                            const payload: any = {
                               title: newTitle,
                               durationMinutes: newDuration,
                               questions: exam.questions,
                               active,
+                              startTime: startTime || exam.startTime || null,
+                              endTime: endTime || exam.endTime || null,
                             };
                             const r = await fetch('/api/exams/' + exam.id, {
                               method: 'PUT',
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify(payload),
                             });
+                            if (!r.ok) throw new Error(await r.text());
                             const j = await r.json();
-                            if (j?.exam) alert('Updated exam');
+                            if (j?.exam) {
+                              replaceExamLocal(j.exam);
+                              alert('Updated exam');
+                            }
                           }}
                           className="p-2 hover:bg-sky-500/20 hover:text-sky-400 rounded transition-all"
                         >
@@ -320,7 +426,10 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                             if (!confirm('Delete this exam?')) return;
                             const r = await fetch('/api/exams/' + exam.id, { method: 'DELETE' });
                             const j = await r.json();
-                            if (j?.success) alert('Deleted');
+                            if (j?.success) {
+                              removeExamLocal(exam.id);
+                              alert('Deleted');
+                            }
                           }}
                           className="p-2 hover:bg-red-500/20 hover:text-red-400 rounded transition-all"
                         >
@@ -419,8 +528,17 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                                             body: JSON.stringify(payload),
                                           }
                                         );
+                                        if (!r.ok) throw new Error(await r.text());
                                         const j = await r.json();
-                                        if (j?.question) alert('Question updated');
+                                        if (j?.question) {
+                                          const cur = exam.questions || [];
+                                          const idx = cur.findIndex((x: any) => x.id === q.id);
+                                          if (idx !== -1) {
+                                            cur[idx] = j.question;
+                                            replaceExamLocal({ ...exam, questions: cur });
+                                          }
+                                          alert('Question updated');
+                                        }
                                       }}
                                       className="p-2 hover:bg-sky-500/20 hover:text-sky-400 rounded transition-all"
                                     >
@@ -435,7 +553,11 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                                           { method: 'DELETE' }
                                         );
                                         const j = await r.json();
-                                        if (j?.success) alert('Deleted question');
+                                        if (j?.success) {
+                                          const cur = (exam.questions || []).filter((x: any) => x.id !== q.id);
+                                          replaceExamLocal({ ...exam, questions: cur });
+                                          alert('Deleted question');
+                                        }
                                       }}
                                       className="p-2 hover:bg-red-500/20 hover:text-red-400 rounded transition-all"
                                     >
@@ -508,8 +630,15 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
                                   headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify(payload),
                                 });
+                                if (!r.ok) throw new Error(await r.text());
                                 const j = await r.json();
-                                if (j?.question) alert('Question added');
+                                if (j?.question) {
+                                  // update local copy
+                                  const cur = exam.questions || [];
+                                  const newQs = [...cur, j.question];
+                                  replaceExamLocal({ ...exam, questions: newQs });
+                                  alert('Question added');
+                                }
                               }}
                               className="w-full bg-sky-600 hover:bg-sky-500 text-white py-2 rounded font-bold"
                             >
@@ -537,7 +666,22 @@ const AdminDashboard: React.FC<Props> = ({ exams, setExams }) => {
               Individual student reports can be generated here as Excel files.
             </p>
             <div className="mt-8 flex justify-center gap-4">
-              <button className="bg-sky-600 py-2 px-6 rounded-lg">Download Latest Batch</button>
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch('/api/export/all');
+                    if (!res.ok) throw new Error(await res.text());
+                    const j = await res.json();
+                    if (j?.file) window.open(j.file, '_blank');
+                  } catch (e) {
+                    console.error('Export failed', e);
+                    alert('Export failed: ' + String(e));
+                  }
+                }}
+                className="bg-sky-600 py-2 px-6 rounded-lg"
+              >
+                Download Latest Batch
+              </button>
             </div>
           </div>
         )}

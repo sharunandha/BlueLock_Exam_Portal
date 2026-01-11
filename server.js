@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // Create HTTP server and attach Socket.IO
 const server = http.createServer(app);
@@ -57,11 +57,13 @@ app.use('/reports', express.static(path.join(__dirname, 'reports')));
 
 
 // Database Initialization
-const dbDir = path.join(__dirname, 'database');
-if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir);
+const defaultDbDir = path.join(__dirname, 'database');
+const sqliteFile = process.env.SQLITE_FILE ? path.resolve(__dirname, process.env.SQLITE_FILE) : path.join(defaultDbDir, 'exam.db');
+const sqliteDir = path.dirname(sqliteFile);
+if (!fs.existsSync(sqliteDir)) fs.mkdirSync(sqliteDir, { recursive: true });
 
 // Note: sqlite3 might require .verbose() or access through the default object depending on version
-const db = new sqlite3.Database(path.join(dbDir, 'exam.db'));
+const db = new sqlite3.Database(sqliteFile);
 
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS exams (
@@ -71,6 +73,15 @@ db.serialize(() => {
     questions TEXT,
     active BOOLEAN
   )`);
+
+  // ensure schedule columns exist (add if missing)
+  db.all("PRAGMA table_info(exams)", (err, rows) => {
+    if (!err && rows) {
+      const names = rows.map((r) => r.name);
+      if (!names.includes('startTime')) db.run('ALTER TABLE exams ADD COLUMN startTime INTEGER');
+      if (!names.includes('endTime')) db.run('ALTER TABLE exams ADD COLUMN endTime INTEGER');
+    }
+  });
 
   db.run(`CREATE TABLE IF NOT EXISTS submissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,12 +95,23 @@ db.serialize(() => {
     endTime INTEGER,
     browser TEXT
   )`);
+
+  // Remove all duplicate submission rows (keep latest per userId+examId), then create unique index
+  db.run(`DELETE FROM submissions WHERE id NOT IN (SELECT MAX(id) FROM submissions GROUP BY userId, examId)` , function (delErr) {
+    if (delErr) console.error('Error cleaning duplicate submissions:', delErr);
+    else console.log('Duplicate submissions cleanup performed, removed rows:', this.changes);
+
+    db.run(`CREATE UNIQUE INDEX IF NOT EXISTS ux_submissions_user_exam ON submissions(userId, examId)`, (idxErr) => {
+      if (idxErr) console.error('Could not create unique index:', idxErr);
+    });
+  });
 });
 
-// Report Directory
-const reportDir = path.join(__dirname, 'reports', 'BlueLock_Exam_Reports');
-if (!fs.existsSync(path.join(__dirname, 'reports'))) fs.mkdirSync(path.join(__dirname, 'reports'));
-if (!fs.existsSync(reportDir)) fs.mkdirSync(reportDir);
+// Report Directory (configurable via REPORT_DIR env var)
+const reportDir = process.env.REPORT_DIR ? path.resolve(__dirname, process.env.REPORT_DIR) : path.join(__dirname, 'reports', 'BlueLock_Exam_Reports');
+const reportsRoot = path.dirname(reportDir);
+if (!fs.existsSync(reportsRoot)) fs.mkdirSync(reportsRoot, { recursive: true });
+if (!fs.existsSync(reportDir)) fs.mkdirSync(reportDir, { recursive: true });
 
 // API Endpoints
 
@@ -97,24 +119,26 @@ if (!fs.existsSync(reportDir)) fs.mkdirSync(reportDir);
 app.get('/api/exams', (req, res) => {
   db.all('SELECT * FROM exams', (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    const parsed = rows.map(r => ({
+    const parsed = rows.map((r) => ({
       id: r.id,
       title: r.title,
       durationMinutes: r.duration,
       questions: r.questions ? JSON.parse(r.questions) : [],
-      active: !!r.active
+      active: !!r.active,
+      startTime: r.startTime || null,
+      endTime: r.endTime || null,
     }));
     res.json(parsed);
   });
 });
 
 app.post('/api/exams', (req, res) => {
-  const { id = String(Date.now()), title, durationMinutes, questions = [], active = false } = req.body;
+  const { id = String(Date.now()), title, durationMinutes, questions = [], active = false, startTime = null, endTime = null } = req.body;
   const qstr = JSON.stringify(questions);
-  const query = `INSERT INTO exams (id, title, duration, questions, active) VALUES (?, ?, ?, ?, ?)`;
-  db.run(query, [id, title, durationMinutes, qstr, active ? 1 : 0], function(err) {
+  const query = `INSERT INTO exams (id, title, duration, questions, active, startTime, endTime) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+  db.run(query, [id, title, durationMinutes, qstr, active ? 1 : 0, startTime, endTime], function(err) {
     if (err) return res.status(500).json({ error: err.message });
-    const exam = { id, title, durationMinutes, questions, active };
+    const exam = { id, title, durationMinutes, questions, active, startTime, endTime };
     io.emit('examCreated', exam);
     res.json({ success: true, exam });
   });
@@ -122,11 +146,11 @@ app.post('/api/exams', (req, res) => {
 
 app.put('/api/exams/:id', (req, res) => {
   const id = req.params.id;
-  const { title, durationMinutes, questions = [], active = false } = req.body;
+  const { title, durationMinutes, questions = [], active = false, startTime = null, endTime = null } = req.body;
   const qstr = JSON.stringify(questions);
-  db.run(`UPDATE exams SET title = ?, duration = ?, questions = ?, active = ? WHERE id = ?`, [title, durationMinutes, qstr, active ? 1 : 0, id], function(err) {
+  db.run(`UPDATE exams SET title = ?, duration = ?, questions = ?, active = ?, startTime = ?, endTime = ? WHERE id = ?`, [title, durationMinutes, qstr, active ? 1 : 0, startTime, endTime, id], function(err) {
     if (err) return res.status(500).json({ error: err.message });
-    const exam = { id, title, durationMinutes, questions, active };
+    const exam = { id, title, durationMinutes, questions, active, startTime, endTime };
     io.emit('examUpdated', exam);
     res.json({ success: true, exam });
   });
@@ -224,6 +248,11 @@ app.get('/api/stats', (req, res) => {
         if ((score / total) >= 0.5) passCount += 1;
       }
       try { const vs = JSON.parse(r.violations || '[]'); totalViolations += vs.length; } catch(e) { void e; }
+    });
+
+    if (totalStudents > 0) avgScore = avgScore / totalStudents;
+    res.json({ totalStudents, avgScore, passCount, totalViolations });
+  });
 });
 
 // Export All Submissions as Excel
@@ -279,7 +308,7 @@ app.get('/api/export/all', async (req, res) => {
 app.get('/api/submissions', (req, res) => {
   db.all('SELECT * FROM submissions ORDER BY id DESC LIMIT 100', (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    const parsed = rows.map(r => ({
+    const parsed = rows.map((r) => ({
       id: r.id,
       userId: r.userId,
       userName: r.userName,
@@ -289,95 +318,113 @@ app.get('/api/submissions', (req, res) => {
       violations: r.violations ? JSON.parse(r.violations) : [],
       startTime: r.startTime,
       endTime: r.endTime,
-      browser: r.browser
+      browser: r.browser,
     }));
     res.json(parsed);
   });
 });
+
+// Check whether a user has already submitted an exam
+app.get('/api/submissions/check', (req, res) => {
+  const { examId, userId } = req.query;
+  if (!examId || !userId) return res.status(400).json({ error: 'Missing examId or userId' });
+  db.get('SELECT id FROM submissions WHERE examId = ? AND userId = ?', [examId, userId], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ submitted: !!row, submissionId: row ? row.id : null });
+  });
+});
 app.post('/api/submit', async (req, res) => {
   const data = req.body;
-  
-  const query = `INSERT INTO submissions 
-    (userId, userName, examId, score, totalMarks, violations, startTime, endTime, browser) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    
-  const params = [
-    data.userId, 
-    data.userName, 
-    data.examId, 
-    data.score, 
-    data.totalQuestions, 
-    JSON.stringify(data.violations), 
-    data.startTime, 
-    data.endTime, 
-    'Chrome/Edge'
-  ];
 
-  db.run(query, params, async function(err) {
-    if (err) {
-      console.error('Database Error:', err);
-      return res.status(500).json({ error: err.message });
-    }
-    
-    try {
-      const workbook = new ExcelJS.Workbook();
-      const sheet = workbook.addWorksheet('Result');
-      sheet.columns = [
-        { header: 'Field', key: 'field', width: 25 },
-        { header: 'Value', key: 'value', width: 40 }
-      ];
-      
-      sheet.addRows([
-        { field: 'Student Name', value: data.userName },
-        { field: 'Registration ID', value: data.userId },
-        { field: 'Exam Name', value: data.examName || data.examId },
-        { field: 'Score', value: `${data.score}/${data.totalQuestions}` },
-        { field: 'Percentage', value: `${((data.score / data.totalQuestions) * 100).toFixed(2)}%` },
-        { field: 'Violations Count', value: data.violations.length },
-        { field: 'Start Time', value: new Date(data.startTime).toLocaleString() },
-        { field: 'End Time', value: new Date(data.endTime).toLocaleString() },
-        { field: 'Status', value: (data.score / data.totalQuestions >= 0.5) ? 'PASS' : 'FAIL' }
-      ]);
+  // Prevent multiple submissions by the same user for the same exam
+  db.get('SELECT id FROM submissions WHERE userId = ? AND examId = ?', [data.userId, data.examId], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (row) return res.status(400).json({ error: 'User has already submitted this exam' });
 
-      sheet.getRow(1).font = { bold: true };
+    const query = `INSERT INTO submissions 
+      (userId, userName, examId, score, totalMarks, violations, startTime, endTime, browser) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-      const safeName = data.userName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-      const fileName = `${safeName}_${data.examId}_${Date.now()}.xlsx`;
-      const filePath = path.join(reportDir, fileName);
-      
-      await workbook.xlsx.writeFile(filePath);
-      console.log(`Excel Report generated: ${fileName}`);
+    const params = [
+      data.userId,
+      data.userName,
+      data.examId,
+      data.score,
+      data.totalQuestions,
+      JSON.stringify(data.violations),
+      data.startTime,
+      data.endTime,
+      'Chrome/Edge',
+    ];
 
-      // Emit submission event for real-time monitoring
-      io.emit('submission', {
-        id: this.lastID,
-        userId: data.userId,
-        userName: data.userName,
-        examId: data.examId,
-        score: data.score,
-        totalQuestions: data.totalQuestions,
-        startTime: data.startTime,
-        endTime: data.endTime,
-        reportPath: fileName
-      });
+    db.run(query, params, async function (err) {
+      if (err) {
+        console.error('Database Error:', err);
+        return res.status(500).json({ error: err.message });
+      }
 
-      res.json({ success: true, submissionId: this.lastID, reportPath: fileName });
-    } catch (excelErr) {
-      console.error('Excel Generation Error:', excelErr);
-      // still emit the submission event even if excel fails
-      io.emit('submission', {
-        id: this.lastID,
-        userId: data.userId,
-        userName: data.userName,
-        examId: data.examId,
-        score: data.score,
-        totalQuestions: data.totalQuestions,
-        startTime: data.startTime,
-        endTime: data.endTime,
-        reportPath: null
-      });
-      res.json({ success: true, submissionId: this.lastID, warning: 'Data saved to DB, but Excel file generation failed.' });
-    }
+      (async () => {
+        try {
+          const workbook = new ExcelJS.Workbook();
+          const sheet = workbook.addWorksheet('Result');
+          sheet.columns = [
+            { header: 'Field', key: 'field', width: 25 },
+            { header: 'Value', key: 'value', width: 40 },
+          ];
+
+          sheet.addRows([
+            { field: 'Student Name', value: data.userName },
+            { field: 'Registration ID', value: data.userId },
+            { field: 'Exam Name', value: data.examName || data.examId },
+            { field: 'Score', value: `${data.score}/${data.totalQuestions}` },
+            { field: 'Percentage', value: `${((data.score / data.totalQuestions) * 100).toFixed(2)}%` },
+            { field: 'Violations Count', value: data.violations.length },
+            { field: 'Start Time', value: new Date(data.startTime).toLocaleString() },
+            { field: 'End Time', value: new Date(data.endTime).toLocaleString() },
+            { field: 'Status', value: data.score / data.totalQuestions >= 0.5 ? 'PASS' : 'FAIL' },
+          ]);
+
+          sheet.getRow(1).font = { bold: true };
+
+          const safeName = data.userName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+          const fileName = `${safeName}_${data.examId}_${Date.now()}.xlsx`;
+          const filePath = path.join(reportDir, fileName);
+
+          await workbook.xlsx.writeFile(filePath);
+          console.log(`Excel Report generated: ${fileName}`);
+
+          // Emit submission event for real-time monitoring
+          io.emit('submission', {
+            id: this.lastID,
+            userId: data.userId,
+            userName: data.userName,
+            examId: data.examId,
+            score: data.score,
+            totalQuestions: data.totalQuestions,
+            startTime: data.startTime,
+            endTime: data.endTime,
+            reportPath: fileName,
+          });
+
+          res.json({ success: true, submissionId: this.lastID, reportPath: fileName });
+        } catch (excelErr) {
+          console.error('Excel Generation Error:', excelErr);
+          // still emit the submission event even if excel fails
+          io.emit('submission', {
+            id: this.lastID,
+            userId: data.userId,
+            userName: data.userName,
+            examId: data.examId,
+            score: data.score,
+            totalQuestions: data.totalQuestions,
+            startTime: data.startTime,
+            endTime: data.endTime,
+            reportPath: null,
+          });
+          res.json({ success: true, submissionId: this.lastID, warning: 'Data saved to DB, but Excel file generation failed.' });
+        }
+      })();
+    });
   });
 });
 
@@ -391,5 +438,7 @@ if (process.env.NODE_ENV !== 'test') {
   });
 }
 
-// Export for testing
-export { app, server, db, reportDir };
+// For test environments, expose helpful handles on globalThis (not required in production)
+if (process.env.NODE_ENV === 'test') {
+  globalThis.__bluelock__ = { app, server, db, reportDir };
+}
