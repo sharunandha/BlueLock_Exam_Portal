@@ -56,8 +56,8 @@ This project uses ESLint and Prettier with Husky pre-commit hooks to keep code c
 
 If you want to enable hooks locally after cloning, run:
 
-  npm ci
-  npm run prepare
+npm ci
+npm run prepare
 
 ---
 
@@ -170,6 +170,7 @@ docker-compose up -d --build
 ```
 
 Notes:
+
 - SQLite uses a single file; ensure the `database/` volume is mounted so data is not lost.
 - Excel report generation writes to the `reports/BlueLock_Exam_Reports` directory—ensure write permissions.
 
@@ -178,9 +179,13 @@ Notes:
 ## CI & Deployment ideas
 
 - This repo already includes a basic GitHub Actions workflow that runs `npm ci`, `npx tsc --noEmit`, `npm run build` and `npm test` on push/PR.
+
+(Trivial change to test pre-commit hooks)
+
 - To deploy from CI you can add a job to build and push a Docker image to a registry (GitHub Packages / Docker Hub) and then trigger a rollout in your host environment.
 
 Example deploy step (high level):
+
 - Build image with `docker build -t ghcr.io/<org>/<repo>:${{ github.sha }} .`
 - Push image to registry with auth set via secrets
 - Deploy to your host (SSH + docker-compose pull && docker-compose up -d) or update your orchestrator (K8s, etc.).
